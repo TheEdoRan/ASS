@@ -1165,8 +1165,19 @@ echo -e "\nFinished ${CYAN}Arch Linux${NC} installation!"
 
 sleep 2
 
+dialog_box --yesno "Installation completed!\n\nOne last thing: do you want to \
+clone FART (Fastest Arch Real Timesaver Installer) to install a full-featured \
+system?\n\nIf so, you must run \"./fart\" in your home directory after \
+reboot."
+
+if [ "$?" == 0 ]; then
+  clear
+  curl https://raw.githubusercontent.com/theedoran/FART/master/install > /home/$USERNAME/fart
+  chmod +x /home/$USERNAME/fart
+fi
+
 # Ask for reboot and for FART cloning.
-dialog_box --yesno "Installation completed!\n\nDo you want to reboot the machine now?"
+dialog_box --yesno "Do you want to reboot the machine now?"
 
 # If user chose to reboot the machine.
 if [ "$?" == 1 ]; then
