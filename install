@@ -450,17 +450,14 @@ with this layout?\n\n"
     fi
 
     # Root partition.
-    #msg+=$(echo -e ""$disk"2\t\t"$root_size"G Linux filesystem")
     msg+=$(printf "%s2\t%6s Linux filesystem (/)" "$disk" ""$root_size"G")
     msg+="\n"
 
     # Swap partition.
-    #msg+=$(echo -e ""$disk"3\t\t$AUTO_SWAP_SIZE Linux swap")
     msg+=$(printf "%s3\t%6s Linux swap" "$disk" "$AUTO_SWAP_SIZE")
     msg+="\n"
   else
     # Root partition.
-    #msg+=$(echo -e ""$disk"2\t\t"$root_size"G Linux filesystem")
     msg+=$(printf "%s2\t%6s Linux filesystem (/)" "$disk" ""$root_size"G")
   fi
 
