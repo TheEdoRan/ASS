@@ -1173,8 +1173,8 @@ reboot."
 
 if [ "$?" == 0 ]; then
   clear
-  curl https://raw.githubusercontent.com/theedoran/FART/master/install > /home/$USERNAME/fart
-  chmod +x /home/$USERNAME/fart
+  curl https://raw.githubusercontent.com/theedoran/FART/master/install > /mnt/home/$USERNAME/fart
+  chmod +x /mnt/home/$USERNAME/fart
 fi
 
 # Ask for reboot and for FART cloning.
