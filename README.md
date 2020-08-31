@@ -24,3 +24,7 @@ The installer only supports **UEFI systems**.
 
 In order to run the installer, you need to be connected to the internet, via
 cable or Wi-Fi.
+
+#### Linked projects
+
+See also [FART Installer](https://github.com/theedoran/FART).
