@@ -895,6 +895,7 @@ the installation process."
 #           PRE-INSTALL           #
 ###################################
 
+
 # Check if we're booted in UEFI mode.
 if ! ls /sys/firmware/efi/efivars &>/dev/null; then
   echo 'Install is not booted in UEFI mode. This installer only supports UEFI systems. Exiting.'
