@@ -1,0 +1,1177 @@
+#!/usr/bin/env bash
+
+
+##################################
+#              INIT              #
+##################################
+
+
+TITLE="Arch, Stupid Simple Install Script"
+
+# Colors
+NC='\033[0m'
+CYAN='\033[0;36m'
+RED='\033[0;31m'
+
+# Find out which parent is live disk.
+LIVE_DISK=$(lsblk -nl | grep /run/archiso/bootmnt | awk '{print $1}')
+LIVE_DISK=$(lsblk -no PKNAME /dev/$LIVE_DISK 2>/dev/null)
+
+# Get list of available disks.
+AVAIL_DISKS=$(lsblk -ndo KNAME,TYPE | grep disk)
+
+# If live disk is present, filter the parent from available disks.
+[ -n "$LIVE_DISK" ] && AVAIL_DISKS=$(echo "$AVAIL_DISKS" | grep -v "$LIVE_DISK")
+
+# Get disks name only.
+AVAIL_DISKS=$(echo "$AVAIL_DISKS" | awk '{print $1}')
+
+ #Convert disk list to array.
+AVAIL_DISKS=($AVAIL_DISKS)
+
+# If no available disks found, exit the script.
+[ -z "$AVAIL_DISKS" ] && echo "No available disks found. Could not \
+#proceed with installation." && exit 1
+
+# Global vars.
+INSTALL_MODULES=""
+LINUX_KERNEL=""
+KERNEL_PARAMS=""
+UCODE=""
+KEYMAP=""
+USERNAME=""
+USER_PWD=""
+ROOT_PWD=""
+LOCALE_GENS=""
+LOCALE_DEFAULT=""
+TIMEZONE_REGION=""
+TIMEZONE_CITY=""
+HOSTNAME=""
+PARTITION_MODE=""
+SELECTED_DISK="" # Selected disk for partitioning.
+PART_CONFIRM=false
+AUTO_SWAP_SIZE=""
+
+
+###################################
+#              UTILS              #
+###################################
+
+
+# Exit the script
+exit_script () {
+  clear && echo -e "${RED}Script terminated before finish.${NC}" && exit 1
+}
+
+# Check if user wants to exit before finish.
+trap exit_script INT
+
+# Dialog util.
+dialog_box () {
+  dialog --title "${TITLE}" "$@" 0 0
+}
+
+dialog_modules () {
+  local MODULES=("base|on" "base-devel|on" "linux-firmware|on" "texinfo|on"
+    "inetutils|on" "wpa_supplicant|off" "networkmanager|on" "perl|on" \
+    "man-db|on" "man-pages|on" "diffutils|on" "less|on" "nano|on" "vi|on" \
+    "neovim|on" "sysfsutils|on" "e2fsprogs|on" "dosfstools|on" "usbutils|on" \
+    "which|on" "logrotate|on"  "reflector|on" "git|on" "bash-completion|on")
+
+  # Array containing arguments for dialog checklist.
+  local ARGS=()
+
+  for m in "${MODULES[@]}"; do
+    # Get module name.
+    local module=$(echo "$m" | sed -E 's/\|.*$//')
+
+    # Get status (on|off).
+    local status=$(echo "$m" | sed -E 's/^.*\|//')
+
+    ARGS+=("$module" "" "$status")
+  done
+
+  # Build checklist and store results in variable.
+  exec 3>&1
+
+  INSTALL_MODULES="$(dialog --checklist 'Select core packages to install:' \
+                      0 0 0 "${ARGS[@]}" 2>&1 1>&3)"
+
+  # If exit code of checklist isn't 0, exit the script.
+  [ "$?" != 0 ] && exit_script
+
+  exec 3>&-
+}
+
+dialog_locale_gens () {
+  local LOCALES=$(grep UTF-8 /etc/locale.gen | tail -n +2 | sed 's/^#//' | \
+    awk '{print $1}')
+
+  # Convert to array.
+  LOCALES=($LOCALES)
+
+  # Array containing arguments for dialog checklist.
+  local ARGS=()
+
+  # Default.
+  ARGS+=("en_US.UTF-8" "" on)
+
+  for l in "${LOCALES[@]}"; do
+    # If locale is american, continue the loop (already present and active).
+    [ "$l" == "en_US.UTF-8" ] && continue
+
+    ARGS+=("$l" "" off)
+  done
+
+  # Build checklist and store results in variable.
+  exec 3>&1
+
+  # Until user select at least one locale, loop the dialog.
+  while [ -z "$LOCALE_GENS" ]; do
+    LOCALE_GENS="$(dialog --checklist 'Select one or more locales:' \
+                        0 0 0 "${ARGS[@]}" 2>&1 1>&3)"
+
+    # If exit code of checklist isn't 0, exit the script.
+    [ "$?" != 0 ] && exit_script
+  done
+
+  exec 3>&-
+}
+
+# $1: destination global variable.
+# $2: list command.
+# $3: default entry.
+# $4: title.
+dialog_radio_cmd () {
+  # Get reference of global variable.
+  local -n REF=$1
+
+  local ARGS=()
+  local LIST=$(eval "$2")
+  LIST=($LIST)
+
+  # Default entry on top of the list.
+  ARGS+=("$3" "" on)
+
+  for e in "${LIST[@]}"; do
+    [ "$e" != "$3" ] && ARGS+=("$e" "" off)
+  done
+
+  exec 3>&1
+
+  # Build radiolist and store results in variable.
+  REF="$(dialog --radiolist "$4" 0 0 0 "${ARGS[@]}" 2>&1 1>&3)"
+
+  # If exit code of checklist isn't 0, exit the script.
+  [ "$?" != 0 ] && exit_script
+
+  exec 3>&-
+}
+
+# $1: context.
+# $2: destination variable (packages installation excluded).
+# $3: array of choices (optional)
+dialog_radio () {
+  local ARGS=()
+  local MSG=""
+  local INSTALL=false
+  local KERNEL=false
+  local RETURN_VALUE=""
+  local FILESYSTEM=false
+  local RES=""
+  local -n REF=${2:-null}
+
+  case "$1" in
+    "keymap")
+      dialog_radio_cmd KEYMAP "localectl list-keymaps" "us" \
+        "Select a keyboard keymap:"
+
+      return
+      ;;
+    "kernel")
+      MSG+="Select a kernel for your system:"
+      ARGS+=(linux "" on linux-lts "" off linux-hardened "" off linux-zen "" off)
+      INSTALL=true
+      KERNEL=true
+      ;;
+    "locale")
+      local DEF_LOCALE=${LOCALE_GENS[0]}
+      local locales=$(echo "${LOCALE_GENS[@]}")
+
+      dialog_radio_cmd LOCALE_DEFAULT "echo $locales" "$DEF_LOCALE" \
+        "Select the default locale for your system:"
+
+      return
+      ;;
+    "timezone_region")
+      local CMD="timedatectl list-timezones | grep -oE '^\w+/' | sort -u | sed 's/\/$//'"
+
+      dialog_radio_cmd TIMEZONE_REGION "$CMD" "Africa" "Choose a timezone region:"
+
+      return
+      ;;
+    "timezone_city")
+      local CMD="timedatectl list-timezones | grep '^$TIMEZONE_REGION\/' | \
+        sed 's/$TIMEZONE_REGION\///'"
+
+      local DEF_CITY=($(eval $CMD))
+      DEF_CITY=(${DEF_CITY[0]})
+
+      dialog_radio_cmd TIMEZONE_CITY "$CMD" "$DEF_CITY" "Choose a timezone city:"
+
+      return
+      ;;
+    "partition_mode")
+      MSG+="Select a partitioning mode:"
+      ARGS+=("Automatic" "" on "Manual" "" off)
+      ;;
+    "partition_disks")
+      MSG+="Select a disk to partition:"
+
+      # First iteration.
+      local do=true
+      for d in "${AVAIL_DISKS[@]}"; do
+        # Get disk size to display.
+        local DISK_SIZE=$(lsblk -ndo SIZE /dev/$d | xargs)
+
+        # At the first iteration, set option to on.
+        [ "$do" = true ] && ARGS+=("$d" "$DISK_SIZE" on) \
+          || ARGS+=("$d" "$DISK_SIZE" off)
+
+        do=false
+      done
+      ;;
+    multiple_partition_*)
+      RETURN_VALUE=2
+
+      MSG+="Multiple ${1:19} partitions detected!\n\nYou must choose one for this install:"
+
+      # Shift arguments twice to get partitions array.
+      shift
+      shift
+
+      # First iteration.
+      local do=true
+      for p in "$@"; do
+        # Get disk size to display.
+        local PART_SIZE=$(lsblk -no SIZE "$p" | xargs)
+
+        # At the first iteration, set option to on.
+        [ "$do" = true ] && ARGS+=("$p" "$PART_SIZE" on) \
+          || ARGS+=("$p" "$PART_SIZE" off)
+
+        do=false
+      done
+      ;;
+    filesystem_*)
+      MSG+="Choose a filesystem for the ${1:11} partition:"
+      ARGS+=("ext4" "" on "jfs" "" off "xfs" "" off "btrfs" "" off)
+      INSTALL=true
+      FILESYSTEM=true
+      RETURN_VALUE=2
+      ;;
+  esac
+
+  exec 3>&1
+
+  RES=$(dialog --radiolist "$MSG" 0 0 0 "${ARGS[@]}" 2>&1 1>&3)
+  local EC=$?
+
+  exec 3>&-
+
+  # If exit code of checklist isn't 0, and return value var is set,
+  # return that value exiting the function.
+  # Otherwise, exit script.
+  if [ "$EC" != 0 ]; then
+    [ -n "$RETURN_VALUE" ] && return "$RETURN_VALUE" || exit_script
+  fi
+
+  # Set reference var to response.
+  REF=$RES
+
+  # Only if we have to install modules too.
+  if [ "$INSTALL" = true ]; then
+    # If we're processing filesystems, add the correct package to install modules.
+    # Otherwise, just add response to install modules.
+    if [ "$FILESYSTEM" = true ]; then
+      case "$RES" in
+        "jfs")
+          INSTALL_MODULES+=" jfsutils"
+          ;;
+        "xfs")
+          INSTALL_MODULES+= " xfsprogs"
+          ;;
+        "btrfs")
+          INSTALL_MODULES+=" btrfs-progs"
+          ;;
+        *)
+          ;;
+      esac
+    else
+      INSTALL_MODULES+=" $RES"
+
+      # Add headers for selected kernel to install modules.
+      if [ "$KERNEL" = true ]; then
+        LINUX_KERNEL=$RES
+        INSTALL_MODULES+=" $RES-headers"
+      fi
+    fi
+  fi
+}
+
+# $1: variable to set.
+# $2: box title.
+# $3: allow empty string.
+# $4: different command to execute if exit code is not 0 (defaults to exit script).
+dialog_input () {
+  # Get reference of variable.
+  local -n REF=$1
+  local EC=""
+
+  # If empty string are allowed.
+  if [ "$3" = true ]; then
+    exec 3>&1
+
+    REF=$(dialog --inputbox "$2" 0 0 2>&1 1>&3)
+    EC=$?
+
+    exec 3>&-
+
+    # If $4 not passed, exit script. Otherwise execute $4.
+    if [ -z "$4" ]; then
+      [ "$EC" != 0 ] && exit_script
+    else
+      [ "$EC" != 0 ] && eval "$4"
+    fi
+  else
+    while [ -z "$REF" ]; do
+      exec 3>&1
+
+      REF=$(dialog --inputbox "$2" 0 0 2>&1 1>&3)
+      EC=$?
+
+      exec 3>&-
+
+      # If $4 not passed, exit script. Otherwise execute $4.
+      if [ -z "$4" ]; then
+        [ "$EC" != 0 ] && exit_script
+      else
+        [ "$EC" != 0 ] && eval "$4"
+    fi
+    done
+  fi
+
+}
+
+#$1: variable to set.
+#$2: box title.
+dialog_password () {
+  local FIRST=""
+  local -n CONFIRM=$1
+
+  # First iteration.
+  local do=true
+
+  while [ "$do" = true ] || [ "$CONFIRM" != "$FIRST" ]; do
+    # Executed first iteration.
+    do=false
+
+    # Reset vars.
+    FIRST=""
+    CONFIRM=""
+
+    while [ -z "$FIRST" ]; do
+      exec 3>&1
+
+      FIRST=$(dialog --insecure --passwordbox "$2" 0 0 2>&1 1>&3)
+
+      # If exit code of input box isn't 0, exit the script.
+      [ "$?" != 0 ] && exit_script
+
+      exec 3>&-
+    done
+
+    while [ -z "$CONFIRM" ]; do
+      exec 3>&1
+
+      CONFIRM=$(dialog --insecure --passwordbox "Confirm the password:" \
+        0 0 2>&1 1>&3)
+
+      # If exit code of input box isn't 0, exit the script.
+      [ "$?" != 0 ] && exit_script
+
+      exec 3>&-
+    done
+  done
+}
+
+
+############## PARTITIONING ##############
+
+
+# $1: label.
+# $2: partition.
+# $3: filesystem.
+make_filesystem () {
+  case "$3" in
+    jfs|btrfs|xfs)
+      mkfs."$3" -f -L "$1" "$2"
+      ;;
+    ext4)
+      mkfs."$3" -F -L "$1" "$2"
+      ;;
+  esac
+}
+
+confirm_auto_partitioning () {
+  local disk="/dev/"$SELECTED_DISK""
+  local bytes=$(fdisk -l "$disk" | grep -oP '\d+ ?(?=bytes)' | head -n1)
+  local gb=$(echo "$bytes" | awk '{print $1 / 1024 / 1024 / 1024}')
+
+  local msg="Are you sure you want to auto-partition the $SELECTED_DISK disk \
+with this layout?\n\n"
+
+  # EFI partition.
+  msg+=$(printf "%s1\t%6s EFI System" "$disk" "1G")
+  msg+="\n"
+
+  # Subtract EFI space.
+  local root_size=$(bc <<< "$gb"-1)
+
+  # Only if user chose to have swap.
+  if [ -n "$AUTO_SWAP_SIZE" ]; then
+    local swap_size=""
+
+    # Subtract swap space from root partition.
+    if [[ "$AUTO_SWAP_SIZE" == *G ]]; then
+      root_size=$(bc <<< "$root_size-${AUTO_SWAP_SIZE%?}")
+    else
+      root_size=$(bc <<< "$root_size-(${AUTO_SWAP_SIZE%?} / 1024)")
+    fi
+
+    # Root partition.
+    #msg+=$(echo -e ""$disk"2\t\t"$root_size"G Linux filesystem")
+    msg+=$(printf "%s2\t%6s Linux filesystem (/)" "$disk" ""$root_size"G")
+    msg+="\n"
+
+    # Swap partition.
+    #msg+=$(echo -e ""$disk"3\t\t$AUTO_SWAP_SIZE Linux swap")
+    msg+=$(printf "%s3\t%6s Linux swap" "$disk" "$AUTO_SWAP_SIZE")
+    msg+="\n"
+  else
+    # Root partition.
+    #msg+=$(echo -e ""$disk"2\t\t"$root_size"G Linux filesystem")
+    msg+=$(printf "%s2\t%6s Linux filesystem (/)" "$disk" ""$root_size"G")
+  fi
+
+  dialog_box --yesno "$msg"
+}
+
+auto_partition () {
+  # Disk selection.
+  dialog_radio "partition_disks" SELECTED_DISK
+
+  # Initialize root filesystem.
+  local ROOT_FILESYSTEM=""
+
+  # Filesystem selection for the root partition.
+  dialog_radio "filesystem_root" ROOT_FILESYSTEM
+
+  # If user chose to not continue, return function.
+  [ "$?" != 0 ] && return 2
+
+  # Ask for swap space.
+  dialog_box --yesno "\nDo you want to create a swap partition for your system?"
+
+  # If user chose no, skip swap partition creation.
+  # Otherwise, ask for swap size.
+  if [ "$?" == 1 ]; then
+    # Ask the user to confirm.
+    confirm_auto_partitioning
+
+    # If user chose to not continue, return function.
+    # Otherwise set confirm var to true.
+    [ "$?" == 1 ] && return || PART_CONFIRM=true
+
+    # Clear the screen.
+    clear
+
+    # Wipe the disk.
+    wipefs -a /dev/$SELECTED_DISK
+
+    # Partition the disk.
+    # EFI partition.
+    sgdisk -n 1:0:+1G -t 1:ef00 /dev/$SELECTED_DISK
+
+    # Make root partition.
+    sgdisk -n 2:0:0 -t 2:8300 /dev/$SELECTED_DISK
+
+    # Update partition table.
+    partprobe 2>/dev/null
+
+    # Format partitions.
+    # Format EFI partition.
+    mkfs.fat -F32 /dev/"$SELECTED_DISK"1
+
+    # Format root partition.
+    make_filesystem "ROOT" /dev/"$SELECTED_DISK"2 "$ROOT_FILESYSTEM"
+
+    # Mount partitions.
+    # Mount root partition.
+    mount /dev/"$SELECTED_DISK"2 /mnt
+
+    # Make directory for EFI partition mount.
+    mkdir -p /mnt/boot
+
+    # Mount EFI partition.
+    mount /dev/"$SELECTED_DISK"1 /mnt/boot
+
+  else
+    local MAX_SWAP_SPACE=""
+
+    until [[ "$AUTO_SWAP_SIZE" =~ ^[0-9]+(M|G)$ ]] && \
+      [ "${AUTO_SWAP_SIZE%?}" -lt "$MAX_SWAP_SPACE" ]; do
+      # Reset size.
+      AUTO_SWAP_SIZE=""
+
+      # Max swap space is disk capaity - 10G.
+      MAX_SWAP_SPACE=$(lsblk -ndo SIZE /dev/$SELECTED_DISK | xargs | \
+        sed 's/.$//' | sed 's/,.*//')
+
+      MAX_SWAP_SPACE=$(( MAX_SWAP_SPACE - 10 ))
+
+      dialog_input AUTO_SWAP_SIZE "How big you want swap size to be?\nE.G. 4G, 512M, etc."
+
+      # If swap size is in MB, convert max swap space to MB.
+      [[ "$AUTO_SWAP_SIZE" == *M ]] && MAX_SWAP_SPACE=$(bc <<< $MAX_SWAP_SPACE*1024)
+    done
+
+    # Ask the user to confirm.
+    confirm_auto_partitioning
+
+    # If user chose to not continue, return function.
+    # Otherwise set confirm var to true.
+    [ "$?" == 1 ] && return 2 || PART_CONFIRM=true
+
+    # Clear the screen.
+    clear
+
+    # Wipe the disk.
+    wipefs -a /dev/$SELECTED_DISK
+
+    # Partition the disk.
+    # EFI partition.
+    sgdisk -n 1:0:+1G -t 1:ef00 /dev/$SELECTED_DISK
+
+    # Root partition (leave space for swap at the end of disk).
+    sgdisk -n 2:0:-$AUTO_SWAP_SIZE -t 2:8300 /dev/$SELECTED_DISK
+
+    # Swap partition.
+    sgdisk -n 3:0:0 -t 3:8200 /dev/$SELECTED_DISK
+
+    # Update partition table.
+    partprobe 2>/dev/null
+
+    # Format partitions.
+    # Format EFI partition.
+    mkfs.fat -F32 /dev/"$SELECTED_DISK"1
+
+    # Format root partition.
+    make_filesystem "ROOT" /dev/"$SELECTED_DISK"2 "$ROOT_FILESYSTEM"
+
+    # Mount partitions.
+    # Mount root partition.
+    mount /dev/"$SELECTED_DISK"2 /mnt
+
+    # Make directory for EFI partition mount.
+    mkdir -p /mnt/boot
+
+    # Mount EFI partition.
+    mount /dev/"$SELECTED_DISK"1 /mnt/boot
+
+    # Activate swap.
+    mkswap /dev/"$SELECTED_DISK"3 -L "SWAP"
+    swapon /dev/"$SELECTED_DISK"3
+  fi
+}
+
+# $1: context.
+# $2: variable to set.
+# $3: array of partitions (optional).
+manual_partition_message () {
+  case "$1" in
+    NO_*)
+      dialog_box --msgbox \
+        "\nNo ${1:3} partition detected!\n\nYou must re-partition disk(s)!"
+      ;;
+    MULTIPLE_*)
+      local operation=${1:9} # Get operation from case.
+      local -n VAR=$2 # Get reference of variable to set.
+
+      # Shift arguments twice to get partition array.
+      shift
+      shift
+
+      case "$operation" in
+        EFI|Swap)
+          dialog_radio "multiple_partition_$operation" VAR "$@"
+
+          # If exit code isn't 0 (user aborted), return the function.
+          [ "$?" == 2 ] && return 2
+          ;;
+        Linux)
+          dialog_box --msgbox "\nMultiple Linux partitions detected!\n\n\
+You must choose the mountpoint for each partition.\n\nFor example, for root \
+partition you need to enter \"/\"."
+
+          # Iterate over Linux partitions array.
+          for p in "$@"; do
+            local PART_SIZE=$(lsblk -no SIZE "$p" | xargs)
+            local msg="If you don't want to affect this partition, don't \
+type anything in the input box.\n\nSelect mountpoint for $p ($PART_SIZE):"
+
+            # Iterate until user inputs a valid mountpoint,
+            # ("/" or "/[word]*" or empty).
+
+            # Init
+            local do=true
+            local empty_mountpoint=false
+            local valid_mountpoint=false
+
+            # Mountpoints array copy for checking duplicate mountpoints.
+            local mountpoints="${VAR[@]}"
+
+            until [ "$do" = false ] && \
+              { [ "$empty_mountpoint" = true ] || [ "$valid_mountpoint" = true ] ; }; do
+              dialog_input VAR[$p] "$msg" true "return 2"
+
+              # If exit code of input box is 2, return the function.
+              [ "$?" == 2 ] && return 2
+
+              # Set flags accordingly.
+              [ -z "${VAR[$p]}" ] && empty_mountpoint=true
+
+              if [ -n "${VAR[$p]}" ] && [[ "${VAR[$p]}" =~ ^\/[a-z]*$ ]] && \
+                [[ ! " ${mountpoints[@]} " =~ " ${VAR[$p]} " ]]; then
+                valid_mountpoint=true
+              fi
+
+              do=false
+              done
+            done
+          ;;
+      esac
+      ;;
+  esac
+}
+
+# $1: EFI partition.
+# $2: Swap partition (if present).
+# $3: Linux mountpoints array reference.
+confirm_manual_partitioning () {
+  # Get partitions and their infos.
+  local PARTITIONS="$(fdisk -l -o Device,Size,Type /dev/$SELECTED_DISK | \
+   grep -oP $(echo "/dev/$SELECTED_DISK\d+.*"))"
+
+  # Split partitions info by newlines.
+  readarray -t partitions <<< "$PARTITIONS"
+
+  # Reference of $3, Linux partitions mountpoints.
+  local -n MOUNTPOINTS=$3
+
+  local INFOS=""
+
+  # Iterate over partitions.
+  for p in "${partitions[@]}"; do
+    # Add beginning of line.
+    INFOS+="$p"
+
+    # If line begins with swap or EFI partition passed, put an * at the end.
+    [[ "$p" =~ ^$1.*|^$2.* ]] && INFOS+=" [*]"
+
+    # Get partition name only.
+    local n=$(echo $p | awk '{print $1}')
+
+    # If mountpoints array contains this partition, display its mountpoint.
+    [ -n "${MOUNTPOINTS[$n]}" ] && INFOS+=" ($(echo "${MOUNTPOINTS[$n]}")) [*]"
+
+    # Add newline.
+    INFOS+="\n"
+  done
+
+  local msg="\nAre you sure you want to partition the "$SELECTED_DISK" disk?\n\n\
+[*] = partition will be formatted and used for this installation.\n\n\
+The disk has the following layout:\n\n$INFOS"
+
+  dialog_box --cr-wrap --yesno "$msg"
+
+  # If user chose no, return function.
+  [ "$?" == 1 ] && return 2
+}
+
+
+manual_partition () {
+  # Array containing user chosen disks to partition.
+  declare -A DISKS
+
+  local FINISHED=false
+
+  # Continue until user finishes partitioning.
+  until [ "$FINISHED" = true ]; do
+    FINISHED=false
+
+    # Disk selection.
+    dialog_radio "partition_disks" SELECTED_DISK
+
+    # Add disk to array.
+    DISKS[$SELECTED_DISK]=1
+
+    # Let the user partition the disk.
+    cfdisk /dev/$SELECTED_DISK
+
+    # Ask the user if another disk has to be partitioned.
+    dialog_box --yesno "\nDo you want to partition another disk or redo \
+partitioning for this one?"
+
+    # If user chose no, the process is completed.
+    [ "$?" == 1 ] && FINISHED=true
+  done
+
+  # Arrays containing partitions with these types.
+  local PART_EFI=()
+  local PART_LINUX=()
+  local PART_SWAP=()
+
+  # Iterate over disk
+  for d in "${!DISKS[@]}"; do
+    local output=$(fdisk -l /dev/$d)
+
+    PART_EFI+=($(echo "$output" | grep "EFI System" | awk '{print $1}'))
+    PART_LINUX+=($(echo "$output" | grep "Linux filesystem" | awk '{print $1}'))
+    PART_SWAP+=($(echo "$output" | grep "Linux swap" | awk '{print $1}'))
+  done
+
+  # EFI
+  # If no EFI partition found, display an error and return the function.
+  [ "${#PART_EFI[@]}" -eq 0 ] && manual_partition_message "NO_EFI" && return 3
+
+  # Set selected partition to the first element of EFI array.
+  local SELECTED_EFI=${PART_EFI[0]}
+
+  # If there are more than one EFI partition in selected disk(s), let the user
+  # choose which one is correct for this installation.
+  [ "${#PART_EFI[@]}" -gt 1 ] && manual_partition_message "MULTIPLE_EFI" \
+    SELECTED_EFI "${PART_EFI[@]}"
+
+  # If exit code isn't 0 (user aborted), return the function.
+  [ "$?" == 2 ] && return 2
+
+  # LINUX
+  # If no Linux FS partition found, display an error and return the function.
+  [ "${#PART_LINUX[@]}" -eq 0 ] && manual_partition_message "NO_Linux" && return 3
+
+  # Array containing Linux FS partition -> mountpoint.
+  declare -A LINUX_MOUNTPOINTS
+
+  # If no Linux FS partition found, display an error and return the function.
+  if [ "${#PART_LINUX[@]}" -eq 1 ]; then
+    # Map first element of Linux array to root mountpoint.
+    LINUX_MOUNTPOINTS[${PART_LINUX[0]}]="/"
+  # If there are more than one Linux FS partition in selected disk(s), let the
+  # user choose mountpoints for this installation.
+  else
+    # Iterate until root ("/") mountpoint is found in array. If not, the
+    # installation cannot proceed.
+    local has_root=false
+
+    until [[ "$has_root" = true ]]; do
+      manual_partition_message "MULTIPLE_Linux" LINUX_MOUNTPOINTS "${PART_LINUX[@]}"
+
+      # If exit code isn't 0 (user aborted), return the function.
+      [ "$?" == 2 ] && return 2
+
+      # Check if root is present. If not, inform the user he has to provide
+      # a root mountpoint.
+      if [[ " ${LINUX_MOUNTPOINTS[@]} " =~ " / " ]]; then
+        has_root=true
+      else
+        dialog_box --msgbox "\nA root mountpoint (\"/\") must be set to continue \
+the installation process."
+      fi
+    done
+  fi
+
+  # Array containing Linux FS partition -> filesystem type.
+  declare -A LINUX_FILESYSTEMS
+
+  # Iterate through Linux partitions, if mountpoint exists ask for filesystem.
+  for p in "${PART_LINUX[@]}"; do
+    [ -n "${LINUX_MOUNTPOINTS[$p]}" ] && \
+      dialog_radio "filesystem_${LINUX_MOUNTPOINTS[$p]}" LINUX_FILESYSTEMS[$p]
+
+      # If exit code isn't 0 (user aborted), return the function.
+      [ "$?" == 2 ] && return 2
+  done
+
+  # SWAP
+  # Initialize selected swap partition to first element of swap array,
+  # if not found, to empty (no swap).
+  local SELECTED_SWAP=${PART_SWAP[0]:-""}
+
+  # If there are more than one swap partition in selected disk(s), let the user
+  # choose which one is correct for this installation.
+  [ "${#PART_SWAP[@]}" -gt 1 ] && manual_partition_message "MULTIPLE_Swap" \
+    SELECTED_SWAP "${PART_SWAP[@]}"
+
+  # If exit code isn't 0 (user aborted), return the function.
+  [ "$?" == 2 ] && return 2
+
+  # Ask the user for confirmation for each disk.
+  for d in "${!DISKS[@]}"; do
+    SELECTED_DISK=$d
+    confirm_manual_partitioning "$SELECTED_EFI" "$SELECTED_SWAP" LINUX_MOUNTPOINTS
+
+  # If exit code isn't 0 (user aborted), return the function.
+    [ "$?" == 2 ] && return 2
+  done
+
+  # Otherwise, set confirm partitioning to true.
+  PART_CONFIRM=true
+
+  clear
+
+  # Format and mount partitions.
+  # If user chose to have a swap partition, make and mount swap.
+  if [ -n "$SELECTED_SWAP" ]; then
+    mkswap "$SELECTED_SWAP" -L "SWAP"
+    swapon "$SELECTED_SWAP"
+  fi
+
+  # Mount root partition.
+  make_filesystem "$ROOT" "$p"
+
+  # Bash is shit.
+
+  # We have to format and mount root partition first.
+  for p in "${!LINUX_FILESYSTEMS[@]}"; do
+    if [ "${LINUX_MOUNTPOINTS[$p]}" == "/" ]; then
+      make_filesystem "ROOT" "$p" "${LINUX_FILESYSTEMS[$p]}"
+      mount "$p" /mnt
+
+      break
+    fi
+  done
+
+  # Iterate through Linux partitions, format and mount them.
+  for p in "${!LINUX_FILESYSTEMS[@]}"; do
+    # If root mountpoint, skip iteration.
+    [ "${LINUX_MOUNTPOINTS[$p]}" == "/" ] && continue
+
+    local label=""
+
+    label=$(echo "${LINUX_MOUNTPOINTS[$p]#?}" | tr '[:lower:]' '[:upper:]')
+
+    # Make directory for mountpoint.
+    mkdir -p /mnt"${LINUX_MOUNTPOINTS[$p]}"
+
+    # Format and mount the partition.
+    make_filesystem "$label" "$p" "${LINUX_FILESYSTEMS[$p]}"
+    mount "$p" /mnt"${LINUX_MOUNTPOINTS[$p]}"
+  done
+
+  # Make directory for EFI partition mount.
+  mkdir -p /mnt/boot
+
+  # Format and mount EFI partition.
+  mkfs.fat -F32 "$SELECTED_EFI"
+  mount "$SELECTED_EFI" /mnt/boot
+
+  # Update partition table.
+  partprobe 2>/dev/null
+}
+
+
+###################################
+#           PRE-INSTALL           #
+###################################
+
+# Check if we're booted in UEFI mode.
+if ! ls /sys/firmware/efi/efivars &>/dev/null; then
+  echo 'Install is not booted in UEFI mode. This installer only supports UEFI systems. Exiting.'
+
+  exit 1
+fi
+
+# Check if we're connected to internet.
+if ! ping -q -w1 -c1 "google.com" &>/dev/null; then
+  echo 'No internet connection detected. Exiting.'
+
+  exit 1
+fi
+
+# Update keyring.
+pacman -Sy archlinux-keyring --noconfirm
+
+# Check if dialog is installed on the system.
+if [ ! -x "$(command -v dialog)" ]; then
+  echo 'dialog not found. Proceeding to install it.'
+  pacman -S dialog --noconfirm
+fi
+
+# Welcome box.
+dialog_box --msgbox "\nWelcome to ASS, the one and only Arch, Stupid Simple \
+installer.\n\nIn the next steps, you'll need to select which packages you want \
+to install for your system, your username, password and some other things.\n\n\
+Note that this installation is for UEFI-only systems."
+
+# Keymap selection.
+dialog_radio "keymap"
+
+# Load keymap.
+loadkeys $(echo "$KEYMAP")
+
+# Pacstrap packages.
+dialog_modules
+
+# If no packages selected, exit the script.
+[ -z "${INSTALL_MODULES}" ] && clear && echo "Nothing to do. Bye bye." && exit 0
+
+# Which Linux to install.
+dialog_radio "kernel"
+
+# Ask the user for kernel parameters.
+dialog_input KERNEL_PARAMS "Type here additional kernel parameters, \
+if you need to have them.\n\nLeave the box empty if you don't need any \
+parameter:" true
+
+# CPU specific packages.
+CPU_VENDOR=$(grep vendor_id /proc/cpuinfo | head -n1 | awk '{print $3}')
+
+case "$CPU_VENDOR" in
+  "GenuineIntel")
+    INSTALL_MODULES+=" intel-ucode"
+    UCODE="intel-ucode"
+    ;;
+  "AuthenticAMD")
+    INSTALL_MODULES+=" amd-ucode"
+    UCODE="amd-ucode"
+    ;;
+esac
+
+# Username selection.
+until [[ "$USERNAME" =~ ^[a-z_]([a-z0-9_-]{0,31}|[a-z0-9_-]{0,30}\$)$ ]]; do
+  # Reset username.
+  USERNAME=""
+
+  dialog_input USERNAME "Choose an username:"
+done
+
+# User password selection.
+dialog_password USER_PWD "Choose a password for ${USERNAME}:"
+
+# Same password for user/root.
+dialog_box --yesno "\nDo you want to use the same password\
+  of $USERNAME for the root account?"
+
+# Check output for previous command, set root password accordingly.
+if [ "$?" == 1 ]; then
+  dialog_password ROOT_PWD "Choose a password for the root account:"
+else
+  ROOT_PWD=$USER_PWD
+fi
+
+# Locale selection.
+dialog_locale_gens
+# Convert locales to array.
+LOCALE_GENS=($LOCALE_GENS)
+
+# Default locale selection, only if user chose more than one locale.
+[ "${#LOCALE_GENS[@]}" -gt 1 ] && dialog_radio "locale" \
+  || LOCALE_DEFAULT="${LOCALE_GENS[0]}"
+
+# Timezone selection.
+# Region selection.
+dialog_radio "timezone_region"
+
+# City selection.
+dialog_radio "timezone_city"
+
+# Hostname selection.
+dialog_input HOSTNAME "Choose a hostname for the machine:"
+
+# Partitioning
+# Iterate until user confirms partition scheme.
+until [ "$PART_CONFIRM" = true ]; do
+  # Reset variable.
+  PART_CONFIRM=false
+
+  # Automatic or manual selection.
+  dialog_radio "partition_mode" PARTITION_MODE
+
+  # If user chose automatic partition mode, ask for swap space and swap size.
+  if [ "$PARTITION_MODE" == "Automatic" ]; then
+    auto_partition
+  else
+    until manual_partition; do :; done
+  fi
+done
+
+# Clear the screen in preparation to installation.
+clear
+
+
+###################################
+#             INSTALL             #
+###################################
+
+
+# Starting the installation.
+echo -e "Starting ${CYAN}Arch Linux${NC} installation!"
+
+sleep 1
+
+# Sync time.
+echo -e "\nSyncing time."
+timedatectl set-ntp true
+
+# Rank mirrors.
+echo -e "\nRanking mirrors for the fastest download experience. \
+This could take a while. Please wait."
+reflector --latest 70 --age 12 --protocol https --sort rate \
+  --save /etc/pacman.d/mirrorlist
+
+# Optimal pacman options.
+echo -e "\nSetting optimal pacman misc options."
+sed -i 's/^#UseSyslog$/UseSyslog/' /etc/pacman.conf
+sed -i 's/^#Color$/Color/' /etc/pacman.conf
+sed -i 's/^#TotalDownload$/TotalDownload/' /etc/pacman.conf
+sed -i 's/^#VerbosePkgLists$/VerbosePkgLists\nILoveCandy/' /etc/pacman.conf
+
+# Proceed to install user selected packages.
+echo -e "\nProceeding to install selected packages."
+pacstrap /mnt $INSTALL_MODULES
+
+# Generate fstab.
+echo -e "\nGenerating fstab."
+genfstab -U /mnt >> /mnt/etc/fstab
+
+# Copying mirrorlist to disk.
+echo -e "\nCopying live mirrorlist to the new system."
+cp /etc/pacman.d/mirrorlist /mnt/etc/pacman.d/mirrorlist
+
+# Decomment locales.
+echo -e "\n Decommenting correct locale(s)."
+for l in "${LOCALE_GENS[@]}"; do
+  sed -i "s/^#$l/$l/" /mnt/etc/locale.gen
+done
+
+echo -e "\nEntering chroot to finalize installation."
+
+# Get UUID of root partition.
+ROOT_UUID=$(lsblk -lno PATH,MOUNTPOINT | grep -E '\/mnt$' | awk '{print $1}')
+ROOT_UUID=$(blkid -s UUID -o value $ROOT_UUID)
+
+# Chroot.
+arch-chroot /mnt /bin/bash <<END
+# Timezone.
+ln -sf /usr/share/zoneinfo/$TIMEZONE_REGION/$TIMEZONE_CITY /etc/localtime
+
+# Time sync.
+timedatectl set-ntp true
+hwclock --systohc
+
+# Locale(s).
+locale-gen
+
+echo "LANG=$LOCALE_DEFAULT" > /etc/locale.conf
+
+# Optimal pacman options.
+sed -i 's/^\#UseSyslog$/UseSyslog/' /etc/pacman.conf
+sed -i 's/^\#Color$/Color/' /etc/pacman.conf
+sed -i 's/^\#TotalDownload$/TotalDownload/' /etc/pacman.conf
+sed -i 's/^\#VerbosePkgLists$/VerbosePkgLists\nILoveCandy/' /etc/pacman.conf
+
+# Keymap.
+echo "KEYMAP=$KEYMAP" > /etc/vconsole.conf
+
+# Hostname.
+echo "$HOSTNAME" > /etc/hostname
+
+# Hosts file.
+rm /etc/hosts &>/dev/null
+echo -e "127.0.0.1\tlocalhost" > /etc/hosts
+echo -e "::1\t\tlocalhost" >> /etc/hosts
+echo -e "127.0.1.1\t$HOSTNAME.localdomain\t$HOSTNAME" >> /etc/hosts
+
+# Generate initramfs.
+mkinitcpio -P
+
+# Setting root password.
+passwd root << EOP
+$ROOT_PWD
+$ROOT_PWD
+EOP
+
+# Adding user.
+useradd -m -G wheel,input -s /bin/bash $USERNAME
+passwd $USERNAME << EOP
+$USER_PWD
+$USER_PWD
+EOP
+
+# Sudoers file.
+sed -i 's/^\# %wheel ALL=(ALL) ALL/%wheel ALL=(ALL) ALL/' /etc/sudoers
+
+# Setting up bootloader.
+
+# Install bootloader.
+bootctl --path=/boot install
+sed -i 's/^\#timeout.*/timeout 0/' /boot/loader/loader.conf
+mkdir -p /boot/loader/entries
+
+echo -e "title\tArch Linux" > /boot/loader/entries/arch.conf
+echo -e "linux\t/vmlinuz-$LINUX_KERNEL" >> /boot/loader/entries/arch.conf
+echo -e "initrd\t/$UCODE.img" >> /boot/loader/entries/arch.conf
+echo -e "initrd\t/initramfs-$LINUX_KERNEL.img" >> /boot/loader/entries/arch.conf
+echo -e "options\troot=UUID=$ROOT_UUID rw $KERNEL_PARAMS" >> /boot/loader/entries/arch.conf
+
+# Update bootloader.
+bootctl update
+
+# Pacman hook, needed when a systemd update occurs.
+mkdir -p /etc/pacman.d/hooks
+
+tee /etc/pacman.d/hooks/100-systemd-boot.hook >/dev/null <<EOB
+[Trigger]
+Type = Package
+Operation = Upgrade
+Target = systemd
+
+[Action]
+Description = Updating systemd-boot
+When = PostTransaction
+Exec = /usr/bin/bootctl update
+EOB
+
+# Enable services.
+systemctl enable NetworkManager
+systemctl enable fstrim.timer
+
+exit
+END
+
+# Finished installing.
+echo -e "\nFinished ${CYAN}Arch Linux${NC} installation!"
+
+sleep 2
+
+# Ask for reboot and for FART cloning.
+dialog_box --yesno "Installation completed!\n\nDo you want to reboot the machine now?"
+
+# If user chose to reboot the machine.
+if [ "$?" == 1 ]; then
+  clear
+else
+  umount -R /mnt
+  reboot -f
+fi
