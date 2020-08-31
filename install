@@ -33,6 +33,21 @@ AVAIL_DISKS=($AVAIL_DISKS)
 [ -z "$AVAIL_DISKS" ] && echo "No available disks found. Could not \
 #proceed with installation." && exit 1
 
+# Check if we're booted in UEFI mode.
+if ! ls /sys/firmware/efi/efivars &>/dev/null; then
+  echo 'Install is not booted in UEFI mode. This installer only supports UEFI systems. Exiting.'
+
+  exit 1
+fi
+
+# Check if we're connected to internet.
+if ! ping -q -w1 -c1 "google.com" &>/dev/null; then
+  echo 'No internet connection detected. Exiting.'
+
+  exit 1
+fi
+
+
 # Global vars.
 INSTALL_MODULES=""
 LINUX_KERNEL=""
@@ -706,7 +721,6 @@ The disk has the following layout:\n\n$INFOS"
   [ "$?" == 1 ] && return 2
 }
 
-
 manual_partition () {
   # Array containing user chosen disks to partition.
   declare -A DISKS
@@ -892,20 +906,6 @@ the installation process."
 #           PRE-INSTALL           #
 ###################################
 
-
-# Check if we're booted in UEFI mode.
-if ! ls /sys/firmware/efi/efivars &>/dev/null; then
-  echo 'Install is not booted in UEFI mode. This installer only supports UEFI systems. Exiting.'
-
-  exit 1
-fi
-
-# Check if we're connected to internet.
-if ! ping -q -w1 -c1 "google.com" &>/dev/null; then
-  echo 'No internet connection detected. Exiting.'
-
-  exit 1
-fi
 
 # Update keyring.
 pacman -Sy archlinux-keyring --noconfirm
