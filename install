@@ -910,8 +910,8 @@ the installation process."
 ###################################
 
 
-# Update keyring.
-pacman -Sy archlinux-keyring --noconfirm
+# Update keyring and install latest reflector.
+pacman -Sy archlinux-keyring reflector --noconfirm
 
 # Check if dialog is installed on the system.
 if [ ! -x "$(command -v dialog)" ]; then
@@ -1038,7 +1038,7 @@ timedatectl set-ntp true
 # Rank mirrors.
 echo -e "\nRanking mirrors for the fastest download experience. \
 This could take a while. Please wait."
-reflector --age 12 --protocol https --sort rate --save /etc/pacman.d/mirrorlist
+reflector --protocol https --age 6 --sort rate --save /etc/pacman.d/mirrorlist
 
 # Optimal pacman options.
 echo -e "\nSetting optimal pacman misc options."
