@@ -5,7 +5,7 @@
 On a freshly **UEFI** booted Arch live, run:
 
 ```
-curl -sL bit.ly/ass-installer | bash
+bash <(curl -sSL bit.ly/ass-installer)
 ```
 
 <hr>
