@@ -1038,8 +1038,7 @@ timedatectl set-ntp true
 # Rank mirrors.
 echo -e "\nRanking mirrors for the fastest download experience. \
 This could take a while. Please wait."
-reflector --latest 70 --age 12 --protocol https --sort rate \
-  --save /etc/pacman.d/mirrorlist
+reflector --age 12 --protocol https --sort rate --save /etc/pacman.d/mirrorlist
 
 # Optimal pacman options.
 echo -e "\nSetting optimal pacman misc options."
