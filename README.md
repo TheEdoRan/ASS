@@ -25,6 +25,16 @@ The installer only supports **UEFI systems**.
 In order to run the installer, you need to be connected to the internet, via
 cable or Wi-Fi.
 
+### Todo list
+
+- [x] Automatic partitioning
+- [x] Manual partitioning
+- [x] Post-install script (**FART**) clone
+- [ ] Disk(s) encryption
+
+<hr>
+
 #### Linked projects
 
 See also [FART Installer](https://github.com/theedoran/FART).
+
