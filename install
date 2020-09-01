@@ -29,9 +29,12 @@ AVAIL_DISKS=$(echo "$AVAIL_DISKS" | awk '{print $1}')
  #Convert disk list to array.
 AVAIL_DISKS=($AVAIL_DISKS)
 
-# If no available disks found, exit the script.
-[ -z "$AVAIL_DISKS" ] && echo "No available disks found. Could not \
-#proceed with installation." && exit 1
+# Check if at least one disk is available for the installation.
+if [ -z "$AVAIL_DISKS" ]; then
+  echo "No available disks found. Could not proceed with installation. Exiting."
+
+  exit 1
+fi
 
 # Check if we're booted in UEFI mode.
 if ! ls /sys/firmware/efi/efivars &>/dev/null; then
