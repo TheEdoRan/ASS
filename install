@@ -1179,7 +1179,7 @@ fi
 # Ask for reboot and for FART cloning.
 dialog_box --yesno "Do you want to reboot the machine now?"
 
-# If user chose to reboot the machine.
+# If user chose not to reboot the machine.
 if [ "$?" == 1 ]; then
   clear
 else
